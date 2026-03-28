@@ -91,6 +91,14 @@ header{display:flex;align-items:center;justify-content:space-between;padding:10p
 .metric-value.pos{color:var(--green)}.metric-value.neg{color:var(--red)}
 .metric-value.cyan{color:var(--cyan)}.metric-value.yellow{color:var(--yellow)}
 
+/* EMA row */
+.card-ema-row{display:flex;align-items:center;flex-wrap:wrap;gap:10px;padding:5px 13px;background:var(--bg);border-top:1px solid var(--border);font-family:var(--mono);font-size:10px}
+.ema-item{display:flex;align-items:center;gap:4px}
+.ema-lbl{color:var(--text3)}
+.ema-v{font-weight:600}
+.filter-tag{margin-left:auto;font-size:9px;padding:2px 7px;border-radius:3px;background:var(--red-dim);color:var(--red);border:1px solid rgba(255,58,92,.2);max-width:260px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.filter-tag.ok{background:var(--green-dim);color:var(--green);border-color:rgba(0,255,156,.2)}
+
 /* RSI gauge row */
 .card-rsi{display:flex;align-items:center;gap:12px;padding:6px 13px;background:var(--bg3);border-top:1px solid var(--border);font-family:var(--mono);font-size:10px}
 .rsi-label{color:var(--text3)}
@@ -225,6 +233,8 @@ header{display:flex;align-items:center;justify-content:space-between;padding:10p
         <div class="cfg-item"><div class="cfg-label">RSI周期</div><div class="cfg-value">7</div></div>
         <div class="cfg-item"><div class="cfg-label">买入信号</div><div class="cfg-value">RSI上穿30</div></div>
         <div class="cfg-item"><div class="cfg-label">卖出信号</div><div class="cfg-value">RSI超过75</div></div>
+        <div class="cfg-item"><div class="cfg-label">过滤①</div><div class="cfg-value">EMA收敛≤3%</div></div>
+        <div class="cfg-item"><div class="cfg-label">过滤②</div><div class="cfg-value">RSI底背离</div></div>
         <div class="cfg-item"><div class="cfg-label">止损</div><div class="cfg-value">-20%</div></div>
         <div class="cfg-item"><div class="cfg-label">监控窗口</div><div class="cfg-value">10min</div></div>
         <div class="cfg-item"><div class="cfg-label">FDV范围</div><div class="cfg-value">$2~5万</div></div>
@@ -233,8 +243,8 @@ header{display:flex;align-items:center;justify-content:space-between;padding:10p
       <div style="margin-top:9px;background:var(--bg3);border:1px solid var(--border);border-radius:4px;padding:8px 10px">
         <div style="font-family:var(--mono);font-size:9px;color:var(--text3);text-transform:uppercase;letter-spacing:.1em;margin-bottom:5px">交易逻辑</div>
         <div style="font-size:11px;color:var(--text2);line-height:2">
-          📈 RSI 上穿 30 → 开仓买入<br/>
-          📉 RSI 超过 75 → 平仓卖出<br/>
+          📈 RSI上穿30 → 过滤① EMA收敛 → 过滤② RSI底背离 → 买入<br/>
+          📉 RSI超过75 → 平仓卖出<br/>
           🛑 跌破入场价 -20% → 止损平仓<br/>
           ♻️ 10min 内可反复开平仓<br/>
           ⏰ 10min 到期 → 平仓并移除
@@ -420,6 +430,21 @@ function upsertCard(t) {
         <span class="rsi-zone"><span class="rsi-dot" style="background:var(--red)"></span>75</span>
         ${t.entryPrice ? `<span style="color:var(--purple)">入场 ${(+t.entryPrice).toExponential(3)}</span>` : ''}
       </div>
+    </div>
+    <div class="card-ema-row">
+      <span class="ema-item">
+        <span class="ema-lbl">EMA9</span>
+        <span class="ema-v" style="color:var(--yellow)">${t.ema9 != null ? (+t.ema9).toExponential(3) : '—'}</span>
+      </span>
+      <span class="ema-item">
+        <span class="ema-lbl">EMA20</span>
+        <span class="ema-v" style="color:var(--cyan)">${t.ema20 != null ? (+t.ema20).toExponential(3) : '—'}</span>
+      </span>
+      <span class="ema-item">
+        <span class="ema-lbl">Gap</span>
+        <span class="ema-v" style="color:${t.emaGapPct != null && t.emaGapPct <= 3 ? 'var(--green)' : 'var(--red)'}">${t.emaGapPct != null ? t.emaGapPct.toFixed(2) + '%' : '—'}</span>
+      </span>
+      ${t.filterReason ? `<span class="filter-tag">🚫 ${t.filterReason}</span>` : (t.inPosition ? '' : '<span class="filter-tag ok">✓ 过滤器通过</span>')}
     </div>
     <div class="card-footer">
       <span class="timer">⏱ <span class="timer-lbl">${timeStr}</span></span>

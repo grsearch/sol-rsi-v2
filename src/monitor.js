@@ -87,6 +87,11 @@ class TokenMonitor {
       pnlPct:       null,
       inPosition:   false,
       managing:     false,       // 防并发锁
+      // EMA 指标（由 rsi.js 计算，供 dashboard 显示）
+      ema9:         NaN,
+      ema20:        NaN,
+      emaGapPct:    NaN,
+      filterReason: '',          // 最近一次被过滤的原因
       // 统计（本币种本次监控期内的汇总）
       tradeCount:   0,           // 本次监控期完成的交易笔数
       totalPnlSol:  0,           // 本次监控期净盈亏 SOL
@@ -224,12 +229,17 @@ class TokenMonitor {
       const closed = state.candles.length > 1 ? state.candles.slice(0, -1) : state.candles;
 
       const result = evaluateSignal(closed, state);
-      state.rsi = result.rsi;
+      state.rsi      = result.rsi;
+      // 写回 EMA 指标供 dashboard 显示
+      if (!isNaN(result.ema9))      state.ema9      = result.ema9;
+      if (!isNaN(result.ema20))     state.ema20     = result.ema20;
+      if (!isNaN(result.emaGapPct)) state.emaGapPct = result.emaGapPct;
 
       if (state.managing) continue;  // 止损正在执行，跳过
 
       if (result.signal === 'BUY' && !state.inPosition) {
-        // 空仓 + RSI 上穿买入线 → 开仓
+        // 空仓 + RSI 上穿 + 两个过滤器均通过 → 开仓
+        state.filterReason = '';
         logger.warn(`[Monitor] RSI BUY ${state.symbol} — ${result.reason}`);
         state.managing = true;
         try {
@@ -238,8 +248,16 @@ class TokenMonitor {
           state.managing = false;
         }
 
+      } else if (result.blocked) {
+        // RSI 上穿了但被过滤，记录原因供 dashboard 显示
+        if (state.filterReason !== result.blockReason) {
+          state.filterReason = result.blockReason || result.reason;
+          logger.info(`[Monitor] BUY filtered ${state.symbol} — ${state.filterReason}`);
+        }
+
       } else if (result.signal === 'SELL' && state.inPosition) {
         // 持仓 + RSI 超过卖出线 → 平仓
+        state.filterReason = '';
         logger.warn(`[Monitor] RSI SELL ${state.symbol} — ${result.reason}`);
         state.managing = true;
         try {
@@ -422,7 +440,11 @@ class TokenMonitor {
       entryPrice:   pos?.entryPriceUsd ?? null,
       tokenBalance: pos?.tokenBalance  ?? 0,
       pnlPct:       s.pnlPct,
-      rsi:          isNaN(s.rsi) ? null : +s.rsi.toFixed(2),
+      rsi:          isNaN(s.rsi)      ? null : +s.rsi.toFixed(2),
+      ema9:         isNaN(s.ema9)     ? null : +s.ema9.toFixed(8),
+      ema20:        isNaN(s.ema20)    ? null : +s.ema20.toFixed(8),
+      emaGapPct:    isNaN(s.emaGapPct) ? null : +s.emaGapPct.toFixed(2),
+      filterReason: s.filterReason   || '',
       lastSignal:   s.lastSignal,
       candleCount:  s.candles.length,
       tickCount:    s.ticks.length,
