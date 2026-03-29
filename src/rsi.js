@@ -15,6 +15,8 @@
 
 'use strict';
 
+const logger = require('./logger');
+
 const RSI_PERIOD        = parseInt(process.env.RSI_PERIOD          || '7');
 const RSI_BUY           = parseFloat(process.env.RSI_BUY           || '30');   // 上穿此值买入
 const RSI_SELL          = parseFloat(process.env.RSI_SELL          || '75');   // 超过此值卖出
@@ -65,8 +67,6 @@ function calcEMA(closes, period) {
 }
 
 // ── 过滤器1：EMA 收敛检查 ─────────────────────────────────────
-// EMA9 与 EMA20 差值 < 当前价 × EMA_CONVERGE_PCT%
-// 差值过大说明趋势强烈发散，不适合逆势买入
 function checkEmaConverge(closes) {
   if (closes.length < 20) return { pass: false, reason: 'ema_warmup', ema9: NaN, ema20: NaN };
 
@@ -96,24 +96,15 @@ function checkEmaConverge(closes) {
 }
 
 // ── 过滤器2：RSI 底背离检查 ───────────────────────────────────
-// 在最近 RSI_DIVERGE_BARS 根里，找上一个 RSI 谷底（局部最低点）。
-// 要求：本次 RSI 谷底 >= 上次 RSI 谷底（RSI 底部在抬高）。
-// 这说明卖压在减弱，是真实超卖反转而非趋势性下跌中的假反弹。
-//
-// "本次谷底" = 当前 RSI 上穿前的最低点
-// "上次谷底" = 再往前一段时间内的最低点
 function checkRsiDivergence(rsis, currentIdx) {
-  // 向前找"本次谷底"：从当前往回，找到 RSI 开始回升前的最低点
   let thisTrough = Infinity;
   let i = currentIdx - 1;
-  // 往回扫，直到找到一个局部低点（RSI 不再下降）
   while (i >= 0 && rsis[i] <= rsis[i + 1]) {
     if (!isNaN(rsis[i])) thisTrough = Math.min(thisTrough, rsis[i]);
     i--;
   }
   if (thisTrough === Infinity) return { pass: true, reason: 'no_prev_trough' };
 
-  // 继续往回找"上次谷底"（在 RSI_DIVERGE_BARS 范围内）
   const searchStart = Math.max(0, i - RSI_DIVERGE_BARS);
   let prevTrough    = Infinity;
   for (let j = searchStart; j <= i; j++) {
@@ -121,7 +112,6 @@ function checkRsiDivergence(rsis, currentIdx) {
   }
   if (prevTrough === Infinity) return { pass: true, reason: 'no_prev_trough' };
 
-  // 底背离：本次谷底 >= 上次谷底（RSI 底部在抬高）
   const pass = thisTrough >= prevTrough;
   return {
     pass,
@@ -133,14 +123,17 @@ function checkRsiDivergence(rsis, currentIdx) {
   };
 }
 
-// ── 主信号评估 ────────────────────────────────────────────────
-/**
- * 从已收盘K线计算信号。
- *
- * tokenState 读写字段: prevRsi, ema9, ema20, emaGapPct, filterReason
- * Returns: { rsi, ema9, ema20, emaGapPct, signal: null|'BUY'|'SELL', reason, blocked }
- */
+// ── 主信号评估（带 try-catch，单币出错不崩服务）──────────────
 function evaluateSignal(candles, tokenState) {
+  try {
+    return _evaluateSignal(candles, tokenState);
+  } catch (e) {
+    logger.warn(`[RSI] evaluateSignal error for ${tokenState?.symbol || '?'}: ${e.message}`);
+    return { rsi: NaN, ema9: NaN, ema20: NaN, emaGapPct: NaN, signal: null, reason: 'error', blocked: false };
+  }
+}
+
+function _evaluateSignal(candles, tokenState) {
   const closes = candles.map(c => c.close);
   const rsis   = calcRSI(closes, RSI_PERIOD);
   const len    = closes.length;
@@ -182,7 +175,7 @@ function evaluateSignal(candles, tokenState) {
 
     // 过滤器1：EMA 收敛
     if (!emaResult.pass) {
-      logger.debug && logger.debug(`[RSI] BUY blocked — ${emaResult.reason}`);
+      logger.info(`[RSI] BUY blocked — ${emaResult.reason}`);
       return {
         rsi: rsiNow, ema9: emaResult.ema9, ema20: emaResult.ema20, emaGapPct: emaResult.gapPct,
         signal: null,
