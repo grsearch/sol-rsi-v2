@@ -30,8 +30,7 @@ const logger                          = require('./logger');
 const PRICE_POLL_SEC     = parseInt(process.env.PRICE_POLL_SEC        || '1');
 const KLINE_INTERVAL_SEC = parseInt(process.env.KLINE_INTERVAL_SEC    || '3');
 const TOKEN_MAX_AGE_MIN  = parseInt(process.env.TOKEN_MAX_AGE_MINUTES || '10');
-const FDV_MIN_USD        = parseInt(process.env.FDV_MIN_USD           || '20000');
-const FDV_MAX_USD        = parseInt(process.env.FDV_MAX_USD           || '50000');
+const FDV_MIN_USD        = parseInt(process.env.FDV_MIN_USD           || '15000');
 const LP_MIN_USD         = parseInt(process.env.LP_MIN_USD            || '5000');
 const STOP_LOSS_PCT      = parseFloat(process.env.STOP_LOSS_PCT       || '20');
 
@@ -125,13 +124,6 @@ class TokenMonitor {
 
     if (state.fdv === null || state.fdv < FDV_MIN_USD) {
       const r = state.fdv === null ? 'FDV_UNKNOWN' : `FDV_TOO_LOW($${state.fdv})`;
-      logger.warn(`[Monitor] ⛔ ${state.symbol} rejected — ${r}`);
-      state.exitSent = true;
-      setTimeout(() => this._removeToken(state.address, r), 500);
-      return;
-    }
-    if (state.fdv > FDV_MAX_USD) {
-      const r = `FDV_TOO_HIGH($${state.fdv})`;
       logger.warn(`[Monitor] ⛔ ${state.symbol} rejected — ${r}`);
       state.exitSent = true;
       setTimeout(() => this._removeToken(state.address, r), 500);
