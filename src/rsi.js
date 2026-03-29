@@ -1,30 +1,31 @@
 // src/rsi.js — RSI calculation + BUY/SELL signal logic
 //
-// K线周期: KLINE_INTERVAL_SEC (默认 3 秒)
-// 价格轮询: PRICE_POLL_SEC    (默认 1 秒)
-//
 // BUY 触发条件（全部满足）：
 //   1. RSI 上穿 RSI_BUY (30)
-//   2. EMA9 与 EMA20 收敛：差值 < 价格 × EMA_CONVERGE_PCT (默认 3%)
-//   3. RSI 底背离：本次 RSI 谷底 >= 上次 RSI 谷底（不再创新低）
+//   2. EMA9/EMA20 收敛 ≤ EMA_CONVERGE_PCT（K线不足20根时跳过此过滤，不阻塞）
+//   3. RSI 底背离（K线不足时跳过，不阻塞）
 //
 // SELL 触发条件：
 //   RSI 超过 RSI_SELL (75)
 //
-// STOP：当前价跌破入场价 -STOP_LOSS_PCT% → 止损（由 monitor.js 处理）
+// 预热逻辑优化（解决买入滞后）：
+//   - 只需 RSI_PERIOD + 2 根K线即可出信号（默认 9 根）
+//   - EMA20 需要20根预热，不足时跳过EMA过滤器（而不是整体阻塞）
+//   - RSI底背离同理，数据不足时直接放行
 
 'use strict';
 
 const logger = require('./logger');
 
-const RSI_PERIOD        = parseInt(process.env.RSI_PERIOD          || '7');
-const RSI_BUY           = parseFloat(process.env.RSI_BUY           || '30');   // 上穿此值买入
-const RSI_SELL          = parseFloat(process.env.RSI_SELL          || '75');   // 超过此值卖出
-const KLINE_SEC         = parseInt(process.env.KLINE_INTERVAL_SEC  || '3');
-// EMA 收敛阈值：EMA9 与 EMA20 的差值不能超过当前价格的此百分比
-const EMA_CONVERGE_PCT  = parseFloat(process.env.EMA_CONVERGE_PCT  || '3');
-// RSI 底背离：在最近 RSI_DIVERGE_BARS 根 K 线内寻找上一个谷底
-const RSI_DIVERGE_BARS  = parseInt(process.env.RSI_DIVERGE_BARS    || '20');
+const RSI_PERIOD       = parseInt(process.env.RSI_PERIOD         || '7');
+const RSI_BUY          = parseFloat(process.env.RSI_BUY          || '30');
+const RSI_SELL         = parseFloat(process.env.RSI_SELL         || '75');
+const KLINE_SEC        = parseInt(process.env.KLINE_INTERVAL_SEC || '3');
+const EMA_CONVERGE_PCT = parseFloat(process.env.EMA_CONVERGE_PCT || '3');
+const RSI_DIVERGE_BARS = parseInt(process.env.RSI_DIVERGE_BARS   || '20');
+
+// RSI 最少需要 period+1 根收盘价才能算出第一个值，再+1根才能判断穿越
+const RSI_MIN_BARS = RSI_PERIOD + 2;  // 默认 9 根
 
 // ── RSI 计算（Wilder 平滑法，oldest-first）────────────────────
 function calcRSI(closes, period = RSI_PERIOD) {
@@ -67,8 +68,11 @@ function calcEMA(closes, period) {
 }
 
 // ── 过滤器1：EMA 收敛检查 ─────────────────────────────────────
+// K线不足20根时返回 skip=true，由调用方决定是否跳过（不阻塞买入）
 function checkEmaConverge(closes) {
-  if (closes.length < 20) return { pass: false, reason: 'ema_warmup', ema9: NaN, ema20: NaN };
+  if (closes.length < 20) {
+    return { pass: true, skip: true, reason: 'ema_warmup', ema9: NaN, ema20: NaN, gapPct: NaN };
+  }
 
   const ema9s  = calcEMA(closes, 9);
   const ema20s = calcEMA(closes, 20);
@@ -78,7 +82,7 @@ function checkEmaConverge(closes) {
   const price  = closes[len - 1];
 
   if (isNaN(ema9) || isNaN(ema20) || price <= 0) {
-    return { pass: false, reason: 'ema_nan', ema9, ema20 };
+    return { pass: true, skip: true, reason: 'ema_nan', ema9, ema20, gapPct: NaN };
   }
 
   const gapPct = Math.abs(ema9 - ema20) / price * 100;
@@ -86,8 +90,9 @@ function checkEmaConverge(closes) {
 
   return {
     pass,
+    skip: false,
     reason: pass
-      ? `EMA收敛(gap=${gapPct.toFixed(2)}%<${EMA_CONVERGE_PCT}%)`
+      ? `EMA收敛(gap=${gapPct.toFixed(2)}%≤${EMA_CONVERGE_PCT}%)`
       : `EMA发散(gap=${gapPct.toFixed(2)}%>${EMA_CONVERGE_PCT}%)`,
     ema9,
     ema20,
@@ -96,6 +101,7 @@ function checkEmaConverge(closes) {
 }
 
 // ── 过滤器2：RSI 底背离检查 ───────────────────────────────────
+// 数据不足时返回 pass=true（跳过，不阻塞）
 function checkRsiDivergence(rsis, currentIdx) {
   let thisTrough = Infinity;
   let i = currentIdx - 1;
@@ -116,8 +122,8 @@ function checkRsiDivergence(rsis, currentIdx) {
   return {
     pass,
     reason: pass
-      ? `RSI底背离(本次谷底${thisTrough.toFixed(1)}≥上次${prevTrough.toFixed(1)})`
-      : `RSI底部下沉(本次谷底${thisTrough.toFixed(1)}<上次${prevTrough.toFixed(1)})`,
+      ? `RSI底背离(本次${thisTrough.toFixed(1)}≥上次${prevTrough.toFixed(1)})`
+      : `RSI底部下沉(本次${thisTrough.toFixed(1)}<上次${prevTrough.toFixed(1)})`,
     thisTrough,
     prevTrough,
   };
@@ -138,11 +144,10 @@ function _evaluateSignal(candles, tokenState) {
   const rsis   = calcRSI(closes, RSI_PERIOD);
   const len    = closes.length;
 
-  // 至少需要 RSI_PERIOD + 2 根才能判断穿越，且需要 20 根供 EMA20 预热
-  const minBars = Math.max(RSI_PERIOD + 2, 22);
-  if (len < minBars) {
+  // 只需 RSI_MIN_BARS 根即可出信号（默认9根，约27秒）
+  if (len < RSI_MIN_BARS) {
     tokenState.prevRsi = NaN;
-    return { rsi: NaN, ema9: NaN, ema20: NaN, emaGapPct: NaN, signal: null, reason: 'warming_up', blocked: false };
+    return { rsi: NaN, ema9: NaN, ema20: NaN, emaGapPct: NaN, signal: null, reason: `warming_up(${len}/${RSI_MIN_BARS})`, blocked: false };
   }
 
   const rsiNow  = rsis[len - 1];
@@ -152,13 +157,13 @@ function _evaluateSignal(candles, tokenState) {
     return { rsi: NaN, ema9: NaN, ema20: NaN, emaGapPct: NaN, signal: null, reason: 'rsi_nan', blocked: false };
   }
 
-  // 始终计算 EMA 供 dashboard 显示
+  // 始终计算 EMA 供 dashboard 显示（不足20根时为 NaN，无害）
   const emaResult = checkEmaConverge(closes);
   tokenState.ema9      = emaResult.ema9;
   tokenState.ema20     = emaResult.ema20;
   tokenState.emaGapPct = emaResult.gapPct ?? NaN;
 
-  // ── SELL：RSI 超过 RSI_SELL，不加过滤（卖出越快越好）────────
+  // ── SELL：RSI 超过卖出线 ──────────────────────────────────────
   if (rsiNow >= RSI_SELL) {
     tokenState.prevRsi = rsiNow;
     return {
@@ -169,12 +174,12 @@ function _evaluateSignal(candles, tokenState) {
     };
   }
 
-  // ── BUY：RSI 上穿 RSI_BUY ────────────────────────────────────
+  // ── BUY：RSI 上穿买入线 ───────────────────────────────────────
   if (rsiPrev < RSI_BUY && rsiNow >= RSI_BUY) {
     tokenState.prevRsi = rsiNow;
 
-    // 过滤器1：EMA 收敛
-    if (!emaResult.pass) {
+    // 过滤器1：EMA 收敛（预热期跳过，不阻塞）
+    if (!emaResult.skip && !emaResult.pass) {
       logger.info(`[RSI] BUY blocked — ${emaResult.reason}`);
       return {
         rsi: rsiNow, ema9: emaResult.ema9, ema20: emaResult.ema20, emaGapPct: emaResult.gapPct,
@@ -185,7 +190,7 @@ function _evaluateSignal(candles, tokenState) {
       };
     }
 
-    // 过滤器2：RSI 底背离
+    // 过滤器2：RSI 底背离（数据不足时跳过，不阻塞）
     const divResult = checkRsiDivergence(rsis, len - 1);
     if (!divResult.pass) {
       return {
@@ -197,11 +202,12 @@ function _evaluateSignal(candles, tokenState) {
       };
     }
 
-    // 两个过滤器均通过 → 发出 BUY 信号
+    // 过滤器均通过 → BUY
+    const filterNote = emaResult.skip ? '(EMA预热跳过)' : emaResult.reason;
     return {
       rsi: rsiNow, ema9: emaResult.ema9, ema20: emaResult.ema20, emaGapPct: emaResult.gapPct,
       signal: 'BUY',
-      reason: `RSI上穿${RSI_BUY} + ${emaResult.reason} + ${divResult.reason}`,
+      reason: `RSI上穿${RSI_BUY} + ${filterNote} + ${divResult.reason}`,
       blocked: false,
     };
   }
@@ -213,10 +219,7 @@ function _evaluateSignal(candles, tokenState) {
   };
 }
 
-/**
- * 将原始价格 tick 聚合为固定宽度 OHLCV K线。
- * 空桶用前收盘前向填充。
- */
+// ── K线聚合 ───────────────────────────────────────────────────
 function buildCandles(ticks, intervalSec = KLINE_SEC) {
   if (!ticks.length) return [];
 
